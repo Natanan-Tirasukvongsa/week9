@@ -22,7 +22,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include  <stdio.h> //sprintf
+#include <string.h> //string
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,6 +44,10 @@
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+char TxDataBuffer[32] =
+{ 0 };
+char RxDataBuffer[32] =
+{ 0 };
 
 /* USER CODE END PV */
 
@@ -51,6 +56,8 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
+void UARTRecieveAndResponsePolling();
+int16_t UARTRecieveIT();
 
 /* USER CODE END PFP */
 
@@ -89,6 +96,13 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  //ขอบเขตของ temp อยู่ภายในปีกกา ประหยัด cpu
+  {
+	  //กำหนดข้อความ
+	  char temp[]="HELLO WORLD\r\n please type something to test UART\r\n";
+	  //ไม่ใส่ (uint8_t*) ได้แต่ขึ้น warning //1000 ms= timeout ถ้าเกินจากนี้จะ fail
+	  HAL_UART_Transmit(&huart2, (uint8_t*) temp, strlen(temp), 1000); //polling
+  }
 
   /* USER CODE END 2 */
 
@@ -96,6 +110,38 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  /*Method 1 Polling Mode*/
+
+	  		//UARTRecieveAndResponsePolling();
+
+	  		/*Method 2 Interrupt Mode*/
+	  //ขนาด 32 //interrupt 1 ครั้งต้องใส่ข้อมูลครบ 32 เท่านั้นถึงจะทำงานเสร็จ //ระหว่างที่ไม่ interrupt ทำให้คอนโทรลอย่างอื่นได้
+	  //ประกาศนอก loop ได้ แต่จะ IT ครบ 32 ตัวจะทำงานแค่ครั้งเดียว
+	  		HAL_UART_Receive_IT(&huart2,  (uint8_t*)RxDataBuffer, 32);
+
+	  		/*Method 2 W/ 1 Char Received*/
+	  //ดึงข้อมูลแต่ละตัวอกมาโดยไม่ต้องครบ 32
+	  		int16_t inputchar = UARTRecieveIT();
+	  		//ไม่มีค่าอะไรใหม่เข้ามา จะ return data = -1
+	  		if(inputchar!=-1)
+	  		{
+
+	  			sprintf(TxDataBuffer, "ReceivedChar:[%c]\r\n", inputchar);
+	  			HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+	  		}
+	  		//ถ้าตำแหน่งของ data ไม่เหมือนกันแสดงว่ามีตัวแปรใหม่เข้ามา
+
+
+
+	  		/*This section just simulate Work Load*/
+	  		//no need to add //blink 10 Hz
+	  		//ของจริงถ้าใช้ polling จะกระพริบ 1 Hz เพราะ ถ้าrecieveได้ข้อมูล ไม่ครบ 32 จะรอไปเรื่อย ๆ จน timeout
+	  		//ต้องพิมพ์ ตัวอักษรให้ครบ 32 ภายใน 1000 ms ไม่งั้นจะไม่ออกจาก time out หรือไม่ก็ต้องรอ 1000 ms ถึงจะออก
+	  		//ต้องรอ polling timeout ไม่่งั้นจะทำงานื่นไม่ได้ ทำให้คอนโทรลช้า ไม่ realtime
+	  		//ถ้าไม่พิมพ์อะไรเลย recieve จะเก็บค่าเปล่า ๆ มา
+	  		//polling used in loop = Bad
+	  		HAL_Delay(100);
+	  		HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -214,6 +260,49 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void UARTRecieveAndResponsePolling()
+{
+	//create buffer
+	char Recieve[32]={0};
+
+	//start recieve in polling mode
+	HAL_UART_Receive(&huart2, (uint8_t*)Recieve, 32, 1000);
+
+	//create feedback text
+	sprintf(TxDataBuffer, "Received:[%s]\r\n", Recieve); //string printf //print ลงใน TxDataBuffer
+
+	//second text //response ว่าได้รับแล้ว
+	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+
+}
+
+
+int16_t UARTRecieveIT()
+{
+	//store data last position
+	static uint32_t dataPos =0;
+	//create dummy data
+	int16_t data=-1;
+	//check pos in buffer vs last position
+	//32 size - จำนวนที่เหลือ = ตำแหน่งปัจจุบัน
+	//มีการพิมพ์ตำแหน่งจะไม่เท่ากัน
+	if(huart2.RxXferSize - huart2.RxXferCount!=dataPos)
+	{
+		//read data from buffer
+		data=RxDataBuffer[dataPos];
+
+		//move to next pos //ตำแหน่งข้อมูลล่าสุดที่อ่าน
+		dataPos= (dataPos+1)%huart2.RxXferSize;
+	}
+	return data;
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	//if(huart == huartxx) ถ้ามีหลายตัว
+	sprintf(TxDataBuffer, "Received:[%s]\r\n", RxDataBuffer);
+	HAL_UART_Transmit_IT(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer));
+}
 
 /* USER CODE END 4 */
 
